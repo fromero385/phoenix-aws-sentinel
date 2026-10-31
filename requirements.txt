@@ -1,0 +1,5 @@
+# Phoenix AWS Sentinel — Dependencies
+# Core CLI runs with standard library only (zero external packages required for demo / fixture mode)
+# Optional dependency for live AWS scanning:
+# boto3>=1.26.0
+

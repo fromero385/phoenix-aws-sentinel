@@ -1,0 +1,61 @@
+{
+  "_meta": {
+    "data_type": "SYNTHETIC_DEMO",
+    "description": "Representative fixture simulating a mid-stage startup AWS environment. For demonstration and dry-run testing only.",
+    "is_real_cloud_data": false,
+    "warning": "Values represent synthetic architectural modeling. Verified realized financial savings are $0.00."
+  },
+  "account_id": "112233445566-SYNTHETIC-DEMO",
+  "primary_region": "us-east-1",
+  "vpcs": [
+    {
+      "vpc_id": "vpc-0a1b2c3d4e5f6g7h8",
+      "region": "us-east-1",
+      "has_s3_gateway_endpoint": false,
+      "monthly_s3_traffic_via_nat_gb": 7000.0,
+      "private_route_table_id": "rtb-0123456789abcdef0",
+      "nat_gateways": [
+        {
+          "nat_gateway_id": "nat-0987654321fedcba0",
+          "subnet_id": "subnet-public-1a",
+          "state": "available"
+        }
+      ]
+    }
+  ],
+  "ebs_volumes": [
+    {
+      "volume_id": "vol-0123456789abcdef1",
+      "size_gb": 200,
+      "volume_type": "gp2",
+      "state": "available",
+      "region": "us-east-1",
+      "days_unattached": 14
+    },
+    {
+      "volume_id": "vol-0123456789abcdef2",
+      "size_gb": 500,
+      "volume_type": "gp2",
+      "state": "available",
+      "region": "us-east-1",
+      "days_unattached": 45
+    },
+    {
+      "volume_id": "vol-0123456789abcdef3",
+      "size_gb": 300,
+      "volume_type": "gp2",
+      "state": "in-use",
+      "region": "us-east-1",
+      "days_unattached": 0
+    }
+  ],
+  "elastic_ips": [
+    {
+      "allocation_id": "eipalloc-0123456789abcdef0",
+      "public_ip": "54.210.100.42",
+      "is_associated": false,
+      "region": "us-east-1"
+    }
+  ]
+}
+
