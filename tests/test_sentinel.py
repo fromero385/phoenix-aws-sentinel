@@ -44,3 +44,4 @@ if __name__ == "__main__":
     test_standalone_demo_execution()
     test_iam_policy_contains_no_write_actions()
     print("ALL STANDALONE TESTS PASSED SUCCESSFULLY.")
+

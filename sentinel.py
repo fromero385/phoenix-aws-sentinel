@@ -398,7 +398,7 @@ class AwsSentinelScanner:
             feedback_prompt=(
                 "What feature would make this tool worth paying for? "
                 "(Multi-account scanning, CI/CD policy blocking, historical trend tracking). "
-                "Open an issue at: https://github.com/fromero385/phoenix/issues"
+                "Open an issue at: https://github.com/fromero385/phoenix-aws-sentinel/issues"
             ),
             disclaimer=(
                 "EPISTEMIC NOTICE: Values shown are estimated architectural models based on AWS list pricing. "

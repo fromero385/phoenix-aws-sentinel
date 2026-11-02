@@ -87,13 +87,18 @@ The complete minimum IAM policy is located at [`iam-policy.json`](./iam-policy.j
 Phoenix AWS Sentinel is built on standard Python (>=3.9) with zero external dependencies required for synthetic and fixture modes.
 
 ```bash
-# Clone the standalone package
-git clone https://github.com/fromero385/phoenix.git
-cd phoenix/packages/aws-sentinel
+# 1. Clone the standalone public repository
+git clone https://github.com/fromero385/phoenix-aws-sentinel.git
+cd phoenix-aws-sentinel
 
-# (Optional) Install boto3 only if you plan to scan live AWS accounts
-pip install boto3
+# 2. Local Package Installation (Zero dependencies required for offline demo & fixtures)
+pip install .
+
+# Or install with optional live AWS scanning support (installs boto3):
+pip install ".[aws]"
 ```
+
+> **Note on PyPI:** Direct installation via `pip install phoenix-aws-sentinel` is pending official community release approval. Use the local repository install above.
 
 ---
 
@@ -102,26 +107,33 @@ pip install boto3
 To test the tool immediately without providing any AWS credentials or contacting any remote network:
 
 ```bash
+# Using installed console entrypoint:
+aws-sentinel --demo
+
+# Or running directly with python:
 python sentinel.py --demo
 ```
 
 Or pass a custom offline JSON topology fixture:
 
 ```bash
-python sentinel.py --fixture fixtures/synthetic_demo.json --format table
+aws-sentinel --fixture fixtures/synthetic_demo.json --format table
 ```
 
 ---
 
 ## 7. Real AWS Mode
 
-To scan an active AWS account in read-only mode using standard AWS credentials configured on your machine (`~/.aws/credentials` or environment variables):
+To scan an active AWS account in read-only mode using standard AWS credentials configured on your machine (`~/.aws/credentials` or standard environment variables):
 
 ```bash
-# Ensure read-only IAM credentials are set in your shell
+# Ensure read-only IAM credentials and region are set in your shell
 export AWS_REGION="us-east-1"
 
-# Run read-only scan
+# Run read-only scan using console entrypoint:
+aws-sentinel --aws --region us-east-1 --format table
+
+# Or directly with python:
 python sentinel.py --aws --region us-east-1 --format table
 ```
 
@@ -210,7 +222,7 @@ We are researching what features cloud engineers find most valuable before decid
 - Cross-region automated routing visualization?
 
 Share your feedback, bug reports, or feature requests via GitHub Issues:  
-[https://github.com/fromero385/phoenix/issues](https://github.com/fromero385/phoenix/issues)
+[https://github.com/fromero385/phoenix-aws-sentinel/issues](https://github.com/fromero385/phoenix-aws-sentinel/issues)
 
 ---
 

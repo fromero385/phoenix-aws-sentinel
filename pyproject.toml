@@ -34,3 +34,6 @@ aws = ["boto3>=1.26.0"]
 [project.scripts]
 aws-sentinel = "sentinel:main"
 
+[tool.setuptools]
+py-modules = ["sentinel"]
+
