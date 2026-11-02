@@ -3,14 +3,20 @@
 Phoenix AWS Sentinel — Local-First Architectural Cloud Leak & Zombie Asset Detector.
 
 Autonomous, read-only scanner that detects silent infrastructure bleeds in AWS:
-- Active NAT Gateways routing S3 traffic without a free Gateway VPC Endpoint ($0.045/GB bleed)
-- Unattached EBS volumes lingering in 'available' state ($0.10/GB-month bleed)
-- Legacy gp2 EBS volumes that can migrate to gp3 for immediate 20% savings
+- Active NAT Gateways routing S3 traffic without a free Gateway VPC Endpoint
+  (modeled at $0.045/GB in us-east-1 reference pricing when traffic volume is known;
+   classified as POTENTIAL_S3_NAT_OPTIMIZATION with monetary impact UNKNOWN in read-only scans)
+- Unattached EBS volumes lingering in 'available' state
+  (modeled at $0.10/GB-month for gp2 in us-east-1 reference pricing)
+- Legacy gp2 EBS volumes that can migrate to gp3 for estimated baseline storage savings
+  (estimated ~20% reduction based on us-east-1 reference catalog; actual savings vary by provisioned IOPS/throughput and AWS region)
 - Unassociated Elastic IPs incurring idle hourly reservation fees
+  ($0.005/hour under AWS public IPv4 pricing; ~$3.65/month reference estimate in us-east-1)
 
 Guarantees:
 - 100% LOCAL-FIRST & ZERO TELEMETRY: No network telemetry, analytics, or phone-home requests.
-- 100% READ-ONLY: Never requests or invokes Create/Delete/Modify/Put/Update actions.
+- 100% READ-ONLY: Never requests or invokes Create/Delete/Modify/Put/Update actions
+  (invokes only read-only AWS API permissions: 7 ec2:Describe* actions and sts:GetCallerIdentity).
 - ZERO CREDENTIAL STORAGE: Never logs, transmits, or persists AWS credentials.
 - NO SENSITIVE EXPOSURE: Differentiates model estimates from verified realized savings.
 """
@@ -24,14 +30,15 @@ import time
 from dataclasses import dataclass, asdict
 from typing import Dict, Any, List, Optional
 
+__version__ = "0.1.1"
 
 # ==============================================================================
 # PRICING CONSTANTS (AWS US-East-1 Reference Standard)
 # ==============================================================================
-NAT_GATEWAY_DATA_PER_GB_USD = 0.045      # $45.00 per 1,000 GB processed
-EBS_GP2_PRICE_PER_GB_MONTH_USD = 0.10    # $0.10 per GB-month
-EBS_GP3_PRICE_PER_GB_MONTH_USD = 0.08    # $0.08 per GB-month (20% reduction)
-IDLE_EIP_PRICE_PER_HOUR_USD = 0.005      # ~$3.65 per month for unassociated IPv4
+NAT_GATEWAY_DATA_PER_GB_USD = 0.045      # $45.00 per 1,000 GB processed in us-east-1
+EBS_GP2_PRICE_PER_GB_MONTH_USD = 0.10    # $0.10 per GB-month in us-east-1
+EBS_GP3_PRICE_PER_GB_MONTH_USD = 0.08    # $0.08 per GB-month in us-east-1 (baseline 20% savings)
+IDLE_EIP_PRICE_PER_HOUR_USD = 0.005      # ~$3.65 per month for public IPv4 in us-east-1
 
 
 @dataclass
@@ -42,6 +49,8 @@ class FindingConfidenceModel:
     estimated_savings: str
     recommendation: str
     verified_realized_savings: str  # Always $0.00 until verified in audited billing
+    pricing_basis: str = "US_EAST_1_REFERENCE_ESTIMATE"
+    monetary_impact_status: str = "ESTIMATED"  # "ESTIMATED", "UNKNOWN", "VERIFIED_REALIZED"
 
 
 @dataclass
@@ -62,6 +71,8 @@ class ArchitecturalFinding:
     remediation_cli_command: str
     is_non_destructive: bool = True
     data_source: str = "SYNTHETIC_DEMO"
+    pricing_basis: str = "US_EAST_1_REFERENCE_ESTIMATE"
+    monetary_impact_known: bool = True
 
     def to_dict(self) -> Dict[str, Any]:
         return asdict(self)
@@ -81,6 +92,8 @@ class SentinelReport:
     differentiation_summary: Dict[str, Any]
     feedback_prompt: str
     disclaimer: str
+    pricing_basis: str = "US_EAST_1_REFERENCE_ESTIMATE"
+    has_unknown_monetary_impact: bool = False
 
     def to_dict(self) -> Dict[str, Any]:
         return asdict(self)
@@ -102,7 +115,8 @@ class AwsSentinelScanner:
     def run_live_aws_audit(self, region: str = "us-east-1") -> SentinelReport:
         """
         Runs read-only audit against real AWS account via boto3.
-        Invokes ONLY Describe* APIs. Zero write, create, or delete actions.
+        Invokes ONLY documented read-only APIs: sts:GetCallerIdentity and ec2:Describe*.
+        Zero write, create, or delete actions.
         """
         try:
             import boto3
@@ -115,12 +129,18 @@ class AwsSentinelScanner:
 
         try:
             session = boto3.Session(region_name=region)
-            sts = session.client("sts")
-            identity = sts.get_caller_identity()
-            account_id = identity.get("Account", "UNKNOWN_ACCOUNT")
-            ec2 = session.client("ec2")
+            
+            # 1. sts:GetCallerIdentity (graceful fallback if caller lacks STS permission)
+            account_id = "UNKNOWN_ACCOUNT"
+            try:
+                sts = session.client("sts")
+                identity = sts.get_caller_identity()
+                account_id = identity.get("Account", "UNKNOWN_ACCOUNT")
+            except Exception:
+                account_id = "UNKNOWN_ACCOUNT"
 
-            # Strictly Describe* calls
+            # 2. ec2:Describe* calls (strictly read-only)
+            ec2 = session.client("ec2")
             vpcs_resp = ec2.describe_vpcs()
             rts_resp = ec2.describe_route_tables()
             nat_resp = ec2.describe_nat_gateways(Filters=[{"Name": "state", "Values": ["available"]}])
@@ -132,7 +152,7 @@ class AwsSentinelScanner:
         except ClientError as e:
             raise RuntimeError(f"AWS API call failed: {e}")
 
-        # Assemble normalized topology fixture from Describe output
+        # Assemble normalized topology fixture from Describe output without inventing traffic heuristics
         normalized_fixture = self._normalize_aws_describe_data(
             vpcs_resp, rts_resp, nat_resp, endpoints_resp, volumes_resp, eips_resp, account_id, region
         )
@@ -144,7 +164,10 @@ class AwsSentinelScanner:
         volumes_resp: Dict[str, Any], eips_resp: Dict[str, Any],
         account_id: str, region: str
     ) -> Dict[str, Any]:
-        """Normalizes Describe* payloads without storing or leaking credential metadata."""
+        """
+        Normalizes Describe* payloads without storing or leaking credential metadata.
+        Strict invariant: Does NOT invent synthetic traffic volume heuristics in live scans.
+        """
         vpcs_list = []
         for vpc in vpcs_resp.get("Vpcs", []):
             vpc_id = vpc.get("VpcId")
@@ -178,7 +201,10 @@ class AwsSentinelScanner:
                 "vpc_id": vpc_id,
                 "region": region,
                 "has_s3_gateway_endpoint": has_s3_endpoint,
-                "monthly_s3_traffic_via_nat_gb": 1000.0,  # Baseline heuristic for active NATs
+                # In live AWS read-only mode, EC2 Describe APIs cannot measure S3 byte transfer.
+                # Strictly None: traffic volume is NOT observed and must NOT be fabricated.
+                "monthly_s3_traffic_via_nat_gb": None,
+                "traffic_volume_known": False,
                 "private_route_table_id": private_rt_id,
                 "nat_gateways": nat_gateways
             })
@@ -217,29 +243,71 @@ class AwsSentinelScanner:
         now_iso = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
         audit_id = f"SENTINEL_AUDIT_{int(time.time())}"
 
+        # Regional Pricing Truth
+        region_is_us_east_1 = (region == "us-east-1")
+        report_pricing_basis = (
+            "US_EAST_1_REFERENCE_ESTIMATE"
+            if region_is_us_east_1
+            else f"ESTIMATED_US_EAST_1_REFERENCE (Region pricing not verified for {region})"
+        )
+
         # 1. Correlate NAT Gateways x S3 Gateway Endpoints
         for vpc in fixture.get("vpcs", []):
             vpc_id = vpc.get("vpc_id")
             vpc_region = vpc.get("region", region)
             has_s3 = vpc.get("has_s3_gateway_endpoint", False)
             nat_gateways = vpc.get("nat_gateways", [])
-            s3_traffic_gb = float(vpc.get("monthly_s3_traffic_via_nat_gb", 0))
+            
+            traffic_gb_val = vpc.get("monthly_s3_traffic_via_nat_gb")
+            traffic_known = bool(vpc.get("traffic_volume_known", False))
 
-            if nat_gateways and not has_s3 and s3_traffic_gb > 0:
-                bleed = round(s3_traffic_gb * NAT_GATEWAY_DATA_PER_GB_USD, 2)
+            vpc_pricing_basis = (
+                "US_EAST_1_REFERENCE_ESTIMATE"
+                if vpc_region == "us-east-1"
+                else f"ESTIMATED_US_EAST_1_REFERENCE (Region pricing not verified for {vpc_region})"
+            )
+
+            if nat_gateways and not has_s3:
                 ng_id = nat_gateways[0]["nat_gateway_id"]
                 rt_id = vpc.get("private_route_table_id", "rtb-private")
 
+                if traffic_known and traffic_gb_val is not None and traffic_gb_val > 0:
+                    bleed = round(float(traffic_gb_val) * NAT_GATEWAY_DATA_PER_GB_USD, 2)
+                    category = "NAT_GATEWAY_LEAK"
+                    est_waste_str = f"~{traffic_gb_val:.0f} GB/mo S3 traffic incurring ${NAT_GATEWAY_DATA_PER_GB_USD}/GB NAT fee ({vpc_pricing_basis})"
+                    est_savings_str = f"${bleed:.2f}/month (${bleed * 12:.2f}/year)"
+                    monetary_known = True
+                    explanation = (
+                        f"OBSERVED: VPC {vpc_id} routes outbound traffic through NAT Gateway {ng_id} with 0 S3 Gateway Endpoints. "
+                        f"ESTIMATE: ~{traffic_gb_val:.0f} GB/month S3 traffic incurs ${NAT_GATEWAY_DATA_PER_GB_USD}/GB data processing surcharge under {vpc_pricing_basis}. "
+                        f"REALIZED SAVINGS: $0.00 until S3 Gateway VPC Endpoint is attached and verified on billing invoice."
+                    )
+                else:
+                    bleed = 0.0
+                    category = "POTENTIAL_S3_NAT_OPTIMIZATION"
+                    est_waste_str = "UNKNOWN (Traffic volume not observed via read-only EC2 APIs)"
+                    est_savings_str = "UNKNOWN (Depends on actual S3 traffic volume traversing this NAT Gateway)"
+                    monetary_known = False
+                    explanation = (
+                        f"OBSERVED: VPC {vpc_id} has active NAT Gateway {ng_id} and private route table routing to it, "
+                        f"with NO S3 Gateway VPC Endpoint. "
+                        f"INFERENCE: Outbound S3 traffic, IF routed through this NAT Gateway, may incur ${NAT_GATEWAY_DATA_PER_GB_USD}/GB "
+                        f"data processing surcharges under {vpc_pricing_basis}. "
+                        f"UNKNOWN: Actual S3 traffic volume, monthly waste, and realizable savings are UNKNOWN without CloudWatch / VPC Flow Logs."
+                    )
+
                 findings.append(ArchitecturalFinding(
                     finding_id=f"FIND_NAT_S3_{vpc_id}",
-                    category="NAT_GATEWAY_LEAK",
-                    severity="HIGH",
+                    category=category,
+                    severity="HIGH" if monetary_known else "MEDIUM",
                     confidence=FindingConfidenceModel(
                         observed_resource=f"VPC {vpc_id} with NAT Gateway {ng_id} and 0 S3 Gateway Endpoints",
-                        estimated_waste=f"~{s3_traffic_gb:.0f} GB/mo S3 traffic incurring ${NAT_GATEWAY_DATA_PER_GB_USD}/GB NAT fee",
-                        estimated_savings=f"${bleed:.2f}/month (${bleed * 12:.2f}/year)",
+                        estimated_waste=est_waste_str,
+                        estimated_savings=est_savings_str,
                         recommendation="Attach free AWS Gateway VPC Endpoint for S3 to private route tables",
-                        verified_realized_savings="$0.00 (Requires billing audit after remediation)"
+                        verified_realized_savings="$0.00 (Requires billing audit after remediation)",
+                        pricing_basis=vpc_pricing_basis,
+                        monetary_impact_status="ESTIMATED" if monetary_known else "UNKNOWN"
                     ),
                     monthly_bleed_estimate_usd=bleed,
                     verified_realized_savings_usd=0.00,
@@ -247,11 +315,7 @@ class AwsSentinelScanner:
                     resource_type="AWS::EC2::NatGateway",
                     region=vpc_region,
                     vpc_id=vpc_id,
-                    explanation=(
-                        f"VPC {vpc_id} routes outbound traffic through NAT Gateway {ng_id}. "
-                        f"No free S3 Gateway Endpoint was detected. S3 traffic across NAT Gateways "
-                        f"incurs an unnecessary ${NAT_GATEWAY_DATA_PER_GB_USD}/GB data processing surcharge."
-                    ),
+                    explanation=explanation,
                     remediation_action="Create free S3 Gateway VPC Endpoint and bind to private route tables.",
                     remediation_terraform_snippet=(
                         f'resource "aws_vpc_endpoint" "s3" {{\n'
@@ -269,7 +333,9 @@ class AwsSentinelScanner:
                         f"--route-table-ids {rt_id} --dry-run"
                     ),
                     is_non_destructive=True,
-                    data_source=mode
+                    data_source=mode,
+                    pricing_basis=vpc_pricing_basis,
+                    monetary_impact_known=monetary_known
                 ))
 
         # 2. Correlate EBS Volumes (Orphaned & Legacy gp2)
@@ -279,6 +345,11 @@ class AwsSentinelScanner:
             vol_type = vol.get("volume_type", "gp2")
             state = vol.get("state", "in-use")
             vol_region = vol.get("region", region)
+            vol_pricing_basis = (
+                "US_EAST_1_REFERENCE_ESTIMATE"
+                if vol_region == "us-east-1"
+                else f"ESTIMATED_US_EAST_1_REFERENCE (Region pricing not verified for {vol_region})"
+            )
 
             if state == "available":
                 price = EBS_GP3_PRICE_PER_GB_MONTH_USD if vol_type == "gp3" else EBS_GP2_PRICE_PER_GB_MONTH_USD
@@ -289,10 +360,12 @@ class AwsSentinelScanner:
                     severity="MEDIUM",
                     confidence=FindingConfidenceModel(
                         observed_resource=f"EBS Volume {vol_id} ({size_gb} GB, {vol_type}) in state 'available'",
-                        estimated_waste=f"${bleed:.2f}/month unattached storage fee",
-                        estimated_savings=f"${bleed:.2f}/month upon verified decommission",
+                        estimated_waste=f"${bleed:.2f}/month unattached storage fee ({vol_pricing_basis})",
+                        estimated_savings=f"${bleed:.2f}/month upon verified decommission ({vol_pricing_basis})",
                         recommendation="Snapshot volume for backup and delete unattached storage",
-                        verified_realized_savings="$0.00 (Requires manual snapshot & decommission)"
+                        verified_realized_savings="$0.00 (Requires manual snapshot & decommission)",
+                        pricing_basis=vol_pricing_basis,
+                        monetary_impact_status="ESTIMATED"
                     ),
                     monthly_bleed_estimate_usd=bleed,
                     verified_realized_savings_usd=0.00,
@@ -301,8 +374,9 @@ class AwsSentinelScanner:
                     region=vol_region,
                     vpc_id=None,
                     explanation=(
-                        f"EBS Volume {vol_id} ({size_gb} GB {vol_type}) is unattached to any EC2 instance "
-                        f"and continuously incurs charges."
+                        f"OBSERVED: EBS Volume {vol_id} ({size_gb} GB {vol_type}) is unattached to any EC2 instance ('available' state). "
+                        f"ESTIMATE: Storage fee modeled at ${price:.2f}/GB-month based on {vol_pricing_basis}. "
+                        f"REALIZED SAVINGS: $0.00 until volume is safely snapshotted and deleted."
                     ),
                     remediation_action="Take backup snapshot and delete orphaned volume.",
                     remediation_terraform_snippet=f"# Review and delete unattached volume {vol_id} in state.",
@@ -311,20 +385,25 @@ class AwsSentinelScanner:
                         f"aws ec2 delete-volume --volume-id {vol_id} --dry-run"
                     ),
                     is_non_destructive=False,
-                    data_source=mode
+                    data_source=mode,
+                    pricing_basis=vol_pricing_basis,
+                    monetary_impact_known=True
                 ))
             elif state == "in-use" and vol_type == "gp2" and size_gb >= 100:
-                savings = round(size_gb * (EBS_GP2_PRICE_PER_GB_MONTH_USD - EBS_GP3_PRICE_PER_GB_MONTH_USD), 2)
+                diff = round(EBS_GP2_PRICE_PER_GB_MONTH_USD - EBS_GP3_PRICE_PER_GB_MONTH_USD, 2)
+                savings = round(size_gb * diff, 2)
                 findings.append(ArchitecturalFinding(
                     finding_id=f"FIND_EBS_GP3_{vol_id}",
                     category="LEGACY_GP2_VOLUME",
                     severity="LOW",
                     confidence=FindingConfidenceModel(
-                        observed_resource=f"EBS Volume {vol_id} ({size_gb} GB) using legacy gp2",
-                        estimated_waste=f"${savings:.2f}/month premium over gp3 baseline",
-                        estimated_savings=f"${savings:.2f}/month via online modification",
-                        recommendation="Migrate volume from gp2 to gp3 (zero downtime)",
-                        verified_realized_savings="$0.00 (Requires volume modification completion)"
+                        observed_resource=f"EBS Volume {vol_id} ({size_gb} GB) using legacy gp2 storage format",
+                        estimated_waste=f"${savings:.2f}/month estimated baseline premium over gp3 ({vol_pricing_basis})",
+                        estimated_savings=f"${savings:.2f}/month estimated reduction via online modification ({vol_pricing_basis})",
+                        recommendation="Migrate volume from gp2 to gp3 online (evaluate provisioned IOPS/throughput requirements)",
+                        verified_realized_savings="$0.00 (Requires volume modification completion and invoice audit)",
+                        pricing_basis=vol_pricing_basis,
+                        monetary_impact_status="ESTIMATED"
                     ),
                     monthly_bleed_estimate_usd=savings,
                     verified_realized_savings_usd=0.00,
@@ -333,14 +412,17 @@ class AwsSentinelScanner:
                     region=vol_region,
                     vpc_id=None,
                     explanation=(
-                        f"Volume {vol_id} ({size_gb} GB) uses gp2. gp3 delivers identical baseline "
-                        f"throughput (3000 IOPS / 125 MB/s) at 20% lower cost per GB."
+                        f"OBSERVED: Volume {vol_id} ({size_gb} GB) uses legacy gp2 format. "
+                        f"ESTIMATE: gp3 offers baseline throughput (3,000 IOPS / 125 MB/s) at ~20% lower baseline cost per GB "
+                        f"under US-East-1 reference catalog pricing. Actual savings depend on provisioned IOPS/throughput and region."
                     ),
                     remediation_action="Modify volume type to gp3 online without instance restart.",
                     remediation_terraform_snippet=f'# Update type = "gp3" in aws_ebs_volume block.',
                     remediation_cli_command=f"aws ec2 modify-volume --volume-id {vol_id} --volume-type gp3 --dry-run",
                     is_non_destructive=True,
-                    data_source=mode
+                    data_source=mode,
+                    pricing_basis=vol_pricing_basis,
+                    monetary_impact_known=True
                 ))
 
         # 3. Unassociated Elastic IPs
@@ -349,6 +431,11 @@ class AwsSentinelScanner:
             ip = eip.get("public_ip")
             is_assoc = eip.get("is_associated", False)
             eip_region = eip.get("region", region)
+            eip_pricing_basis = (
+                "US_EAST_1_REFERENCE_ESTIMATE"
+                if eip_region == "us-east-1"
+                else f"ESTIMATED_US_EAST_1_REFERENCE (Region pricing not verified for {eip_region})"
+            )
 
             if not is_assoc:
                 bleed = round(IDLE_EIP_PRICE_PER_HOUR_USD * 730, 2)
@@ -357,11 +444,13 @@ class AwsSentinelScanner:
                     category="UNATTACHED_EIP",
                     severity="LOW",
                     confidence=FindingConfidenceModel(
-                        observed_resource=f"Elastic IP {ip} ({eip_id}) not associated to any ENI",
-                        estimated_waste=f"${bleed:.2f}/month idle reservation fee",
-                        estimated_savings=f"${bleed:.2f}/month upon release",
+                        observed_resource=f"Elastic IP {ip} ({eip_id}) not associated to any network interface or instance",
+                        estimated_waste=f"${bleed:.2f}/month unassociated public IPv4 idle reservation fee ({eip_pricing_basis})",
+                        estimated_savings=f"${bleed:.2f}/month upon address release ({eip_pricing_basis})",
                         recommendation="Release unassociated public IPv4 address to AWS pool",
-                        verified_realized_savings="$0.00 (Requires release confirmation)"
+                        verified_realized_savings="$0.00 (Requires release confirmation)",
+                        pricing_basis=eip_pricing_basis,
+                        monetary_impact_status="ESTIMATED"
                     ),
                     monthly_bleed_estimate_usd=bleed,
                     verified_realized_savings_usd=0.00,
@@ -369,15 +458,22 @@ class AwsSentinelScanner:
                     resource_type="AWS::EC2::EIP",
                     region=eip_region,
                     vpc_id=None,
-                    explanation=f"Public IPv4 {ip} is allocated but not associated to any running resource.",
+                    explanation=(
+                        f"OBSERVED: Public IPv4 address {ip} is allocated but not associated to any active resource. "
+                        f"INFERENCE: AWS charges $0.005/hour for public IPv4 addresses; unassociated Elastic IPs incur idle charges "
+                        f"with zero functional utility (~$3.65/month reference estimate in us-east-1)."
+                    ),
                     remediation_action="Release unassociated Elastic IP address.",
                     remediation_terraform_snippet=f"# Delete unassociated aws_eip {eip_id}.",
                     remediation_cli_command=f"aws ec2 release-address --allocation-id {eip_id} --dry-run",
                     is_non_destructive=False,
-                    data_source=mode
+                    data_source=mode,
+                    pricing_basis=eip_pricing_basis,
+                    monetary_impact_known=True
                 ))
 
         total_bleed = round(sum(f.monthly_bleed_estimate_usd for f in findings), 2)
+        has_unknown = any(not f.monetary_impact_known for f in findings)
 
         return SentinelReport(
             audit_id=audit_id,
@@ -401,9 +497,12 @@ class AwsSentinelScanner:
                 "Open an issue at: https://github.com/fromero385/phoenix-aws-sentinel/issues"
             ),
             disclaimer=(
-                "EPISTEMIC NOTICE: Values shown are estimated architectural models based on AWS list pricing. "
-                "Verified realized savings are $0.00 until changes are deployed and verified on your AWS invoice."
-            )
+                "EPISTEMIC NOTICE: Values shown are estimated architectural models based on AWS US-East-1 list pricing. "
+                "Non-US-East-1 regions and traffic volumes not directly measured are marked as estimates or unknown. "
+                "Verified realized savings remain $0.00 until changes are deployed and verified on your AWS invoice."
+            ),
+            pricing_basis=report_pricing_basis,
+            has_unknown_monetary_impact=has_unknown
         )
 
     def _load_default_synthetic_fixture(self) -> Dict[str, Any]:
@@ -417,6 +516,7 @@ class AwsSentinelScanner:
                     "region": "us-east-1",
                     "has_s3_gateway_endpoint": False,
                     "monthly_s3_traffic_via_nat_gb": 7000.0,
+                    "traffic_volume_known": True,
                     "private_route_table_id": "rtb-0123456789abcdef0",
                     "nat_gateways": [
                         {
@@ -473,7 +573,12 @@ def render_report_table(report: SentinelReport) -> str:
     lines.append(f"  Region     : {report.region}")
     lines.append(f"  Audit Time : {report.timestamp}")
     lines.append(f"  Findings   : {report.total_findings}")
-    lines.append(f"  Est. Bleed : ${report.estimated_monthly_bleed_usd:.2f} / month  (${report.estimated_monthly_bleed_usd * 12:.2f} / year)")
+
+    bleed_str = f"${report.estimated_monthly_bleed_usd:.2f} / month"
+    if report.has_unknown_monetary_impact:
+        bleed_str += " (+ UNKNOWN traffic-dependent potential savings)"
+    lines.append(f"  Est. Bleed : {bleed_str}")
+    lines.append(f"  Pricing Ref: {report.pricing_basis}")
     lines.append(f"  Realized   : ${report.verified_realized_savings_usd:.2f} (Verified realized savings)")
     lines.append("-" * 78)
 
@@ -482,6 +587,7 @@ def render_report_table(report: SentinelReport) -> str:
         lines.append(f"    Observed       : {f.confidence.observed_resource}")
         lines.append(f"    Estimated Waste: {f.confidence.estimated_waste}")
         lines.append(f"    Est. Savings   : {f.confidence.estimated_savings}")
+        lines.append(f"    Pricing Basis  : {f.pricing_basis}")
         lines.append(f"    Realized Value : {f.confidence.verified_realized_savings}")
         lines.append(f"    Terraform HCL Fix:")
         for tf_line in f.remediation_terraform_snippet.split("\n"):
@@ -542,4 +648,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-

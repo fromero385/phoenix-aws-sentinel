@@ -14,23 +14,23 @@ A local-first, read-only architectural cloud leak and zombie asset detector for 
 ## 1. Problem
 
 Modern cloud engineering teams frequently suffer silent monthly invoice bleeds caused by subtle architectural routing oversights and disconnected lifecycle stages:
-- **NAT Gateway Data Processing Surcharges:** Internal data flowing from private subnets to Amazon S3 (e.g., container images, analytical dumps, backups, CloudWatch logs) often traverses an active NAT Gateway at **$0.045 per GB**, even though AWS provides free Gateway VPC Endpoints for S3.
-- **Orphaned Storage Volumes:** Terminated EC2 instances leave behind unattached EBS volumes in the `available` state that silently bill storage fees indefinitely.
-- **Legacy Storage Formats:** Volumes provisioned years ago remain on `gp2`, paying a 20% premium over modern `gp3` volumes with identical baseline performance.
-- **Unassociated Elastic IPs:** Reserved public IPv4 addresses not associated with running instances incur continuous hourly reservation fees.
+- **NAT Gateway Routing Oversights:** Internal traffic flowing from private subnets to Amazon S3 (e.g., container pulls, backups, analytical workloads) often traverses an active NAT Gateway at **$0.045 per GB** (US-East-1 reference pricing), even though AWS provides free Gateway VPC Endpoints for S3. Read-only configuration audits detect when a route table points to a NAT Gateway without an S3 endpoint; actual traffic volume and potential savings depend on runtime workloads.
+- **Orphaned Storage Volumes:** Terminated EC2 instances frequently leave behind unattached EBS volumes in the `available` state that silently bill storage fees indefinitely ($0.10/GB-month for gp2 in US-East-1 reference catalog).
+- **Legacy Storage Formats:** Volumes provisioned years ago remain on `gp2`, paying estimated ~20% higher baseline storage costs compared to modern `gp3` volumes with identical baseline performance (3,000 IOPS / 125 MB/s).
+- **Unassociated Elastic IPs:** Reserved public IPv4 addresses not associated with running instances incur continuous idle reservation fees ($0.005/hour under AWS public IPv4 pricing; ~$3.65/month reference estimate in US-East-1).
 
-Traditional cost dashboards typically alert you 24–48 hours after the money is already spent, without indicating the exact Terraform routing block needed to stop the leak.
+Traditional cost dashboards typically alert you 24–48 hours after money is already spent, without indicating the exact Terraform routing block needed to remediate the leak.
 
 ---
 
 ## 2. What It Detects
 
-| Category | Detected Condition | Estimated Impact (US-East-1) | Remediation Generated |
+| Category | Detected Condition | Estimated Impact (US-East-1 Reference) | Remediation Generated |
 | :--- | :--- | :--- | :--- |
-| **NAT_GATEWAY_LEAK** | Private subnet routing `0.0.0.0/0` to a NAT Gateway with 0 S3 Gateway Endpoints | $0.045 per GB processed (~$45 / 1,000 GB) | `aws_vpc_endpoint` Terraform HCL + AWS CLI dry-run |
-| **ORPHANED_EBS** | EBS volume in `available` state (unattached to any instance) | $0.10 per GB-month (gp2) / $0.08 per GB-month (gp3) | Backup snapshot command + volume delete dry-run |
-| **LEGACY_GP2_VOLUME** | Active EBS volume utilizing legacy `gp2` storage (≥100 GB) | ~20% higher storage cost than `gp3` | In-place volume type modification (zero downtime) |
-| **UNATTACHED_EIP** | Allocated public IPv4 address not associated with any ENI or instance | $0.005 per hour (~$3.65 / month per IP) | Elastic IP release dry-run command |
+| **POTENTIAL_S3_NAT_OPTIMIZATION** | Private subnet routing `0.0.0.0/0` to a NAT Gateway with 0 S3 Gateway Endpoints | Monetary impact UNKNOWN in read-only scans (modeled at $0.045/GB if traffic volume is measured) | `aws_vpc_endpoint` Terraform HCL + AWS CLI dry-run |
+| **ORPHANED_EBS** | EBS volume in `available` state (unattached to any instance) | $0.10 per GB-month (gp2) / $0.08 per GB-month (gp3) (US-East-1 reference estimate) | Backup snapshot command + volume delete dry-run |
+| **LEGACY_GP2_VOLUME** | Active EBS volume utilizing legacy `gp2` storage (≥100 GB) | Estimated ~20% baseline storage reduction via gp3 migration (actual depends on provisioned IOPS/throughput and region) | In-place volume type modification (zero downtime) |
+| **UNATTACHED_EIP** | Allocated public IPv4 address not associated with any ENI or instance | $0.005 per hour (~$3.65 / month per IP in US-East-1 reference pricing) | Elastic IP release dry-run command |
 
 ---
 
@@ -41,7 +41,7 @@ Phoenix AWS Sentinel inspects relationships between networking topology and reso
 ```
 [Private Subnet Route Table]
              │
-             ├──► 0.0.0.0/0 ──► [NAT Gateway ($0.045/GB)] ──► [Amazon S3]  (LEAK DETECTED)
+             ├──► 0.0.0.0/0 ──► [NAT Gateway ($0.045/GB ref)] ──► [Amazon S3]  (POTENTIAL LEAK DETECTED)
              │
              └──► [Fix: Add Gateway VPC Endpoint (Free)] ──► Direct S3 Routing
 ```
@@ -52,9 +52,9 @@ Phoenix AWS Sentinel inspects relationships between networking topology and reso
 
 ---
 
-## 4. Read-Only Permissions
+## 4. Read-Only AWS API Permissions
 
-Phoenix AWS Sentinel requires **strictly read-only Describe permissions**. It never requests, requires, or invokes `Create`, `Delete`, `Modify`, `Put`, or `Update` API actions.
+Phoenix AWS Sentinel requires **strictly read-only AWS API permissions** (7 `ec2:Describe*` actions and `sts:GetCallerIdentity`). It never requests, requires, or invokes `Create`, `Delete`, `Modify`, `Put`, or `Update` API actions.
 
 The complete minimum IAM policy is located at [`iam-policy.json`](./iam-policy.json):
 
@@ -72,7 +72,8 @@ The complete minimum IAM policy is located at [`iam-policy.json`](./iam-policy.j
         "ec2:DescribeNatGateways",
         "ec2:DescribeVpcEndpoints",
         "ec2:DescribeVolumes",
-        "ec2:DescribeAddresses"
+        "ec2:DescribeAddresses",
+        "sts:GetCallerIdentity"
       ],
       "Resource": "*"
     }
@@ -143,19 +144,21 @@ python sentinel.py --aws --region us-east-1 --format table
 
 ```text
 ==============================================================================
-  PHOENIX AWS SENTINEL — ARCHITECTURAL AUDIT REPORT (SYNTHETIC_DEMO)
+  PHOENIX AWS SENTINEL — ARCHITECTURAL AUDIT REPORT (REAL_AWS_READONLY)
 ==============================================================================
-  Account ID : 112233445566-SYNTHETIC-DEMO
+  Account ID : 123456789012
   Region     : us-east-1
-  Audit Time : 2026-10-31T18:49:40Z
-  Findings   : 5
-  Est. Bleed : $394.65 / month  ($4735.80 / year)
+  Audit Time : 2026-11-02T20:30:00Z
+  Findings   : 3
+  Est. Bleed : $73.65 / month (+ UNKNOWN traffic-dependent potential savings)
+  Pricing Ref: US_EAST_1_REFERENCE_ESTIMATE
   Realized   : $0.00 (Verified realized savings)
 ------------------------------------------------------------------------------
-[1] HIGH | NAT_GATEWAY_LEAK | nat-0987654321fedcba0
-    Observed       : VPC vpc-0a1b2c3d4e5f6g7h8 with NAT Gateway nat-0987654321fedcba0 and 0 S3 Gateway Endpoints
-    Estimated Waste: ~7000 GB/mo S3 traffic incurring $0.045/GB NAT fee
-    Est. Savings   : $315.00/month ($3780.00/year)
+[1] MEDIUM | POTENTIAL_S3_NAT_OPTIMIZATION | nat-0123456789abcdef0
+    Observed       : VPC vpc-0a1b2c3d4e5f6g7h8 with NAT Gateway nat-0123456789abcdef0 and 0 S3 Gateway Endpoints
+    Estimated Waste: UNKNOWN (Traffic volume not observed via read-only EC2 APIs)
+    Est. Savings   : UNKNOWN (Depends on actual S3 traffic volume traversing this NAT Gateway)
+    Pricing Basis  : US_EAST_1_REFERENCE_ESTIMATE
     Realized Value : $0.00 (Requires billing audit after remediation)
     Terraform HCL Fix:
       resource "aws_vpc_endpoint" "s3" {
@@ -173,17 +176,18 @@ python sentinel.py --aws --region us-east-1 --format table
 
 ---
 
-## 9. Limitations
+## 9. Limitations & Epistemic Truth
 
-- **Pricing Heuristics:** Financial figures represent standard AWS public catalog rates (e.g. US-East-1). Enterprise Discount Programs (EDP) or custom negotiated savings plans are not automatically applied.
-- **Traffic Estimations:** NAT data transfer volume estimation relies on route configuration heuristics or user-provided flow log metrics unless CloudWatch metric queries are specifically supplied.
+- **Pricing Reference Standards:** Financial figures represent standard AWS US-East-1 list catalog estimates. AWS pricing varies by region; non-US-East-1 scans are explicitly labeled as US-East-1 reference estimates. Enterprise Discount Programs (EDP) or custom negotiated savings plans are not automatically reflected.
+- **Traffic Observability:** In read-only mode (`ec2:Describe*`), actual S3 data transfer volume traversing a NAT Gateway cannot be measured without CloudWatch or VPC Flow Log queries. Such findings are truthfully reported as `POTENTIAL_S3_NAT_OPTIMIZATION` with monetary impact `UNKNOWN`.
+- **Verified Realized Savings:** Verified realized savings remain strictly $0.00 until changes are deployed, measured, and verified on an actual AWS billing statement.
 - **Single-Region Scope per Invocation:** Multi-region scanning currently requires running individual passes per target region.
 
 ---
 
 ## 10. Security Model
 
-- **Read-Only Guarantee:** The codebase contains zero API calls that modify, delete, or create cloud resources.
+- **Read-Only Guarantee:** The codebase contains zero API calls that modify, delete, or create cloud resources (only 7 `ec2:Describe*` calls and `sts:GetCallerIdentity`).
 - **Dry-Run by Default:** All remediation commands outputted for operator inspection explicitly include the `--dry-run` flag where supported.
 - **Zero Ingestion of Private Keys:** The tool operates via standard AWS SDK credential resolution chains; it does not request, log, or cache secrets.
 
@@ -229,4 +233,3 @@ Share your feedback, bug reports, or feature requests via GitHub Issues:
 ## License
 
 Licensed under the [Apache License, Version 2.0](./LICENSE).
-

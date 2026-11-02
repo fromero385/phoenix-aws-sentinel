@@ -11,10 +11,10 @@
         "ec2:DescribeNatGateways",
         "ec2:DescribeVpcEndpoints",
         "ec2:DescribeVolumes",
-        "ec2:DescribeAddresses"
+        "ec2:DescribeAddresses",
+        "sts:GetCallerIdentity"
       ],
       "Resource": "*"
     }
   ]
 }
-

@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "phoenix-aws-sentinel"
-version = "0.1.0"
+version = "0.1.1"
 description = "Local-first, read-only architectural cloud leak and zombie asset detector for AWS."
 readme = "README.md"
 requires-python = ">=3.9"
@@ -36,4 +36,3 @@ aws-sentinel = "sentinel:main"
 
 [tool.setuptools]
 py-modules = ["sentinel"]
-
